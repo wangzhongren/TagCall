@@ -4,12 +4,13 @@ from typing import Dict, List, Callable, Any, Optional
 from bs4 import BeautifulSoup
 
 class FunctionRegistry:
-    """函数注册表"""
+    """函数注册表，支持按 agent 隔离注册"""
     
     def __init__(self):
-        self._functions: Dict[str, Dict] = {}
+        # 结构: {agent_name: {func_name: func_info}}
+        self._functions: Dict[str, Dict[str, Dict]] = {}
     
-    def register(self, name: str, prompt: str, function: Callable, function_str: str = None):
+    def register(self, name: str, prompt: str, function: Callable, function_str: str = None, agent: str = "default"):
         """注册函数
         
         Args:
@@ -17,12 +18,16 @@ class FunctionRegistry:
             prompt: 方法提示词说明
             function: 真实的方法
             function_str: 方法字符串，如果为None则自动从源码生成
+            agent: 所属 agent 名称，默认为 "default"
         """
         if function_str is None:
             # 自动从函数源码生成字符串表示
             function_str = self._generate_function_str_from_source(function, name)
         
-        self._functions[name] = {
+        if agent not in self._functions:
+            self._functions[agent] = {}
+        
+        self._functions[agent][name] = {
             "prompt": prompt,
             "function_str": function_str,
             "function": function
@@ -114,26 +119,30 @@ class FunctionRegistry:
         except:
             return f"{name}(...)"
     
-    def get_function(self, name: str) -> Optional[Dict]:
+    def get_function(self, name: str, agent: str = "default") -> Optional[Dict]:
         """获取注册的函数信息"""
-        return self._functions.get(name)
+        return self._functions.get(agent, {}).get(name)
     
-    def get_all_functions(self) -> Dict[str, Dict]:
-        """获取所有注册的函数"""
-        return self._functions.copy()
+    def get_all_functions(self, agent: str = "default") -> Dict[str, Dict]:
+        """获取指定 agent 的所有注册函数"""
+        return self._functions.get(agent, {}).copy()
     
-    def get_prompt_descriptions(self) -> str:
-        """获取所有函数的提示词描述"""
+    def get_all_agents(self) -> List[str]:
+        """获取所有已注册的 agent 名称"""
+        return list(self._functions.keys())
+    
+    def get_prompt_descriptions(self, agent: str = "default") -> str:
+        """获取指定 agent 所有函数的提示词描述"""
         descriptions = []
-        for name, info in self._functions.items():
+        for name, info in self._functions.get(agent, {}).items():
             descriptions.append(f"{info['function_str']} - {info['prompt']}")
         return "\n".join(descriptions)
     
-    def execute_function(self, name: str, *args, **kwargs) -> Any:
+    def execute_function(self, name: str, *args, agent: str = "default", **kwargs) -> Any:
         """执行注册的函数"""
-        func_info = self.get_function(name)
+        func_info = self.get_function(name, agent)
         if not func_info:
-            raise ValueError(f"Function '{name}' is not registered")
+            raise ValueError(f"Function '{name}' is not registered for agent '{agent}'")
         
         return func_info['function'](*args, **kwargs)
 
