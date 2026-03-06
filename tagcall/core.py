@@ -1,7 +1,9 @@
 import inspect
 import ast
+import traceback
 from typing import Dict, List, Callable, Any, Optional
-from bs4 import BeautifulSoup
+import xml.etree.ElementTree as ET
+from xml.parsers.expat import ExpatError
 
 class FunctionRegistry:
     """函数注册表，支持按 agent 隔离注册"""
@@ -17,7 +19,7 @@ class FunctionRegistry:
             name: 函数名称
             prompt: 方法提示词说明
             function: 真实的方法
-            function_str: 方法字符串，如果为None则自动从源码生成
+            function_str: 方法字符串表示，如果为None则自动从源码生成
             agent: 所属 agent 名称，默认为 "default"
         """
         if function_str is None:
@@ -149,125 +151,153 @@ class FunctionRegistry:
 # 全局注册表实例
 global_registry = FunctionRegistry()
 
-def _split_parameters(args_text: str) -> List[str]:
-    """分割参数字符串，处理嵌套的引号和括号"""
-    parts = []
-    current = ""
-    quote_char = None
-    paren_depth = 0
+def _parse_xml_value(element) -> Any:
+    """递归解析XML元素的值"""
+    # 如果元素没有子元素，返回文本内容
+    if len(element) == 0:
+        text = element.text or ""
+        text = text.strip()
+        if not text:
+            return None
+        
+        # 尝试类型推断
+        # 布尔值
+        if text.lower() == 'true':
+            return True
+        elif text.lower() == 'false':
+            return False
+        # 数字
+        try:
+            if '.' in text:
+                return float(text)
+            else:
+                return int(text)
+        except ValueError:
+            pass
+        # 字符串
+        return text
     
-    for char in args_text:
-        if char in ['"', "'"] and quote_char is None:
-            quote_char = char
-            current += char
-        elif char == quote_char:
-            quote_char = None
-            current += char
-        elif char == '(' and quote_char is None:
-            paren_depth += 1
-            current += char
-        elif char == ')' and quote_char is None and paren_depth > 0:
-            paren_depth -= 1
-            current += char
-        elif char == ',' and quote_char is None and paren_depth == 0:
-            parts.append(current.strip())
-            current = ""
+    # 如果有子元素，构建字典或列表
+    result = {}
+    for child in element:
+        child_value = _parse_xml_value(child)
+        # 处理同名子元素（数组）
+        if child.tag in result:
+            if isinstance(result[child.tag], list):
+                result[child.tag].append(child_value)
+            else:
+                result[child.tag] = [result[child.tag], child_value]
         else:
-            current += char
+            result[child.tag] = child_value
     
-    if current.strip():
-        parts.append(current.strip())
-    
-    return parts
+    return result
 
-def _parse_value(value_str: str) -> Any:
-    """解析参数值"""
-    value_str = value_str.strip()
+from typing import List, Dict
+from bs4 import BeautifulSoup
+import re
+import traceback
+
+from typing import List, Dict
+from bs4 import BeautifulSoup
+import re
+import traceback
+
+import re
+from typing import List, Dict, Any
+
+def parse_xml_to_dict(xml_content: str) -> Dict[str, Any]:
+    """
+    递归解析 XML 结构为字典。
+    支持：<tag><subtag>value</subtag></tag> -> {'tag': {'subtag': 'value'}}
+    """
+    result = {}
+    # 匹配 <tag>content</tag>，不处理自闭合标签
+    pattern = re.compile(r'<(\w+)\s*>(.*?)</\1>', re.DOTALL)
+    matches = pattern.findall(xml_content)
     
-    # 字符串
-    if (value_str.startswith('"') and value_str.endswith('"')) or \
-       (value_str.startswith("'") and value_str.endswith("'")):
-        return value_str[1:-1]
+    if not matches:
+        # 如果没有子标签了，返回去前后的字符串内容
+        return xml_content.strip()
     
-    # 数字
-    try:
-        if '.' in value_str:
-            return float(value_str)
-        else:
-            return int(value_str)
-    except ValueError:
-        pass
-    
-    # 布尔值
-    if value_str.lower() == 'true':
-        return True
-    elif value_str.lower() == 'false':
-        return False
-    
-    # None值
-    if value_str.lower() == 'none' or value_str.lower() == 'null':
-        return None
-    
-    # 其他情况返回原字符串
-    return value_str
+    for tag, content in matches:
+        parsed_content = parse_xml_to_dict(content)
+        # 如果有重复标签（如列表），可以考虑转为 list，这里默认覆盖或嵌套
+        result[tag] = parsed_content
+        
+    return result
 
 def parse_function_calls(text: str) -> List[Dict]:
-    """解析函数调用文本
-    
-    Args:
-        text: 包含<function-call>标签的文本
-        
-    Returns:
-        List[Dict]: 解析出的函数调用列表，每个元素包含 'name', 'args', 'kwargs'
     """
-    # 使用 BeautifulSoup 解析 XML/HTML 标签
-    soup = BeautifulSoup(text, 'html.parser')
-    
-    # 查找所有的 function-call 标签
-    function_call_tags = soup.find_all('function-call')
-    
-    if not function_call_tags:
-        return []
-    
+    使用正则严格解析 <function-call>。
+    即便没有闭合标签，也会将错误封装成字典返回。
+    """
     function_calls = []
-    
-    for tag in function_call_tags:
-        call_text = tag.get_text().strip()
+
+    # 1. 定义内部递归解析逻辑
+    def extract_tags_recursive(content: str) -> Any:
+        # 匹配 <tag>内容</tag>
+        # \1 保证了起始和结束标签名必须完全一致
+        pattern = re.compile(r'<(\w+)>(.*?)</\1>', re.DOTALL)
+        matches = pattern.findall(content)
         
-        # 按行分割并解析每个函数调用
-        for line in call_text.split(';'):
-            line = line.strip()
-            if not line:
-                continue
-                
-            # 解析函数名和参数
-            if '(' in line and line.endswith(')'):
-                name_part, args_part = line.split('(', 1)
-                name = name_part.strip()
-                args_text = args_part[:-1].strip()  # 去掉结尾的 ')'
-                
-                # 解析参数
-                args = []
-                kwargs = {}
-                
-                if args_text:
-                    param_parts = _split_parameters(args_text)
-                    for part in param_parts:
-                        part = part.strip()
-                        if '=' in part:
-                            # 关键字参数
-                            key, value = part.split('=', 1)
-                            key = key.strip()
-                            value = _parse_value(value.strip())
-                            kwargs[key] = value
-                        else:
-                            # 位置参数
-                            args.append(_parse_value(part))
-                
-                function_calls.append({
-                    'name': name,
-                    'args': args,
-                    'kwargs': kwargs
-                })
+        if not matches:
+            # 容错：如果还残留 < 符号，说明可能存在未闭合标签
+            if '<' in content:
+                orphan = re.search(r'<(\w+)>', content)
+                if orphan:
+                    raise ValueError(f"发现未闭合标签: <{orphan.group(1)}>，请检查 XML 结构")
+            return content.strip()
+        
+        result = {}
+        for tag, inner_content in matches:
+            result[tag] = extract_tags_recursive(inner_content)
+        return result
+
+    # 2. 寻找所有 <function-call> 的起始位置
+    # 这样即使没有结束标签，我们也能定位到错误
+    start_tags = list(re.finditer(r'<function-call>', text))
     
+    for i, start_match in enumerate(start_tags):
+        start_pos = start_match.start()
+        # 截取当前标签到文本末尾，寻找最近的一个闭合标签
+        remaining_text = text[start_pos:]
+        block_match = re.search(r'<function-call>(.*?)</function-call>', remaining_text, re.DOTALL)
+        
+        try:
+            if not block_match:
+                # 场景：有开头没结尾
+                raise ValueError("检测到 <function-call> 标签未闭合")
+            
+            block_content = block_match.group(1)
+            # 解析内部结构 (例如 <execute_shell><command>...</command></execute_shell>)
+            full_structure = extract_tags_recursive(block_content)
+            
+            if isinstance(full_structure, dict):
+                for func_name, params in full_structure.items():
+                    # 按照你的要求，封装进 kwargs
+                    kwargs = {}
+                    if isinstance(params, dict):
+                        kwargs.update(params)
+                    else:
+                        # 如果函数标签内部直接是文本内容
+                        kwargs['content'] = params
+                    
+                    function_calls.append({
+                        'name': func_name,
+                        'args': [],
+                        'kwargs': kwargs
+                    })
+            else:
+                raise ValueError("未能在 <function-call> 中找到有效的函数名标签")
+
+        except Exception as e:
+            # 发生任何解析错误时，封装成错误 JSON
+            error_info = {
+                'error': str(e),
+                'error_type': type(e).__name__,
+                'error_msg': traceback.format_exc(),
+                'raw_segment': remaining_text[:100] + "..." # 保存出错部分的上下文
+            }
+            function_calls.append(error_info)
+            
     return function_calls

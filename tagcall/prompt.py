@@ -28,8 +28,12 @@ def get_system_prompt(toolbox: Union[str, List[str]] = "default") -> str:
     return (
         f"可用工具函数：\n{functions_desc}\n\n"
         f"调用规则：\n"
-        f"- 若需调用，请在回答中插入 <function-call> 标签，格式如：<function-call>func_name(arg1, arg2)</function-call>\n"
-        f"- 字符串参数必须用双引号包裹（如 message=\"hello\"），数字、布尔值、None 直接书写\n"
+        f"- 若需调用工具函数，请在回答中插入 <function-call></function-call> 标签，使用XML格式\n"
+        f"- **格式：<function-call><函数名><参数名>参数值</参数名></函数名></function-call>\n**"
+        f"- 支持嵌套对象：<function-call><函数名><复杂参数><子参数>值</子参数></复杂参数></函数名></function-call>\n"
+        f"- 参数值直接放在标签内，系统会自动推断类型（数字、布尔值、字符串等）\n"
         f"- 不要解释调用过程，不要输出额外说明\n"
+        f"- 禁止使用自闭标签,正确写法<common></common>,错误写法</commom/>\n"
+        f"- 函数名参数名必须来源于可用工具函数里面的定义,否则就会出现失败\n"
         f"- 若无需调用函数，则直接回答问题"
     )
